@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Bot Telegram tải video Douyin/TikTok không logo
-Yêu cầu: pip install python-telegram-bot yt-dlp requests
+Bot Telegram tải video Douyin không logo - dùng API bên thứ 3
 """
 
 import os
@@ -9,8 +8,8 @@ import re
 import logging
 import asyncio
 import tempfile
-from pathlib import Path
 
+import requests
 from telegram import Update, constants
 from telegram.ext import (
     Application,
@@ -19,11 +18,10 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-import yt_dlp
 
 # ─── CẤU HÌNH ────────────────────────────────────────────────────────────────
 BOT_TOKEN = "8701813803:AAFpLhURyfdncYHKbdoTSaWsGD1veNPJueQ"
-MAX_FILE_MB = 50                     # Giới hạn Telegram Bot API (MB)
+MAX_FILE_MB = 50
 # ──────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -33,65 +31,68 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DOUYIN_PATTERN = re.compile(
-    r"(https?://)?"
-    r"(v\.douyin\.com|www\.douyin\.com|douyin\.com"
-    r"|vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)"
-    r"[^\s]*",
+    r"https?://(v\.douyin\.com|www\.douyin\.com|vm\.tiktok\.com|www\.tiktok\.com|tiktok\.com)[^\s]*",
     re.IGNORECASE,
 )
 
 
 def extract_url(text: str) -> str | None:
-    """Tìm link Douyin/TikTok trong tin nhắn."""
     match = DOUYIN_PATTERN.search(text)
-    if not match:
-        return None
-    url = match.group(0)
-    if not url.startswith("http"):
-        url = "https://" + url
-    return url
+    return match.group(0) if match else None
 
 
-def download_video(url: str, output_dir: str) -> str:
+def get_video_url(url: str) -> tuple[str, str]:
     """
-    Tải video không watermark bằng yt-dlp.
-    Trả về đường dẫn file đã tải.
+    Lấy link video không watermark qua API công khai.
+    Trả về (video_url, title)
     """
-    ydl_opts = {
-        # Ưu tiên format không watermark (Douyin cung cấp stream riêng)
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": os.path.join(output_dir, "%(id)s.%(ext)s"),
-        "quiet": True,
-        "no_warnings": True,
-        "merge_output_format": "mp4",
-        # Header giả lập trình duyệt để tránh bị chặn
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://www.douyin.com/",
-        },
-        # Extractor Douyin hỗ trợ tải video không logo
-        "extractor_args": {
-            "tiktok": {"webpage_download": ["1"]},
-        },
-        "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
-            }
-        ],
-    }
+    apis = [
+        f"https://api.douyin.wtf/api?url={url}",
+        f"https://www.tikwm.com/api/?url={url}&hd=1",
+    ]
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        # Đảm bảo đuôi .mp4
-        if not filename.endswith(".mp4"):
-            filename = Path(filename).with_suffix(".mp4")
-        return str(filename)
+    for api in apis:
+        try:
+            r = requests.get(api, timeout=15, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
+            data = r.json()
+
+            # douyin.wtf format
+            if data.get("code") == 0 or data.get("status") == "ok":
+                video = (
+                    data.get("data", {}).get("play") or
+                    data.get("data", {}).get("wmplay") or
+                    data.get("data", {}).get("video", {}).get("play_addr", {}).get("url_list", [None])[0]
+                )
+                title = data.get("data", {}).get("desc", "Video Douyin")
+                if video:
+                    return video, title
+
+            # tikwm format
+            if data.get("code") == 0 and data.get("data"):
+                video = data["data"].get("play") or data["data"].get("wmplay")
+                title = data["data"].get("title", "Video Douyin")
+                if video:
+                    return video, title
+
+        except Exception as e:
+            logger.error(f"API lỗi ({api}): {e}")
+            continue
+
+    raise Exception("Không thể lấy link video từ các API")
+
+
+def download_file(video_url: str, output_path: str):
+    """Tải file video về máy."""
+    r = requests.get(video_url, stream=True, timeout=60, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.douyin.com/",
+    })
+    r.raise_for_status()
+    with open(output_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
 
 
 # ─── HANDLERS ────────────────────────────────────────────────────────────────
@@ -99,28 +100,7 @@ def download_video(url: str, output_dir: str) -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *Xin chào!* Tôi là bot tải video Douyin không logo.\n\n"
-        "📌 Cách dùng:\n"
-        "Gửi link video Douyin hoặc TikTok, tôi sẽ tải và gửi lại cho bạn.\n\n"
-        "✅ Hỗ trợ:\n"
-        "• douyin.com\n"
-        "• v.douyin.com (link rút gọn)\n"
-        "• tiktok.com\n"
-        "• vm.tiktok.com",
-        parse_mode=constants.ParseMode.MARKDOWN,
-    )
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 *Hướng dẫn sử dụng*\n\n"
-        "1. Mở app Douyin/TikTok\n"
-        "2. Chọn video → Chia sẻ → Sao chép link\n"
-        "3. Dán link vào đây và gửi\n"
-        "4. Chờ vài giây, bot sẽ gửi video không logo!\n\n"
-        "⚠️ *Lưu ý:*\n"
-        "• Video tối đa 50MB\n"
-        "• Chỉ hỗ trợ video công khai\n"
-        "• Không hỗ trợ live stream",
+        "📌 Gửi link video Douyin hoặc TikTok, tôi sẽ tải về cho bạn!",
         parse_mode=constants.ParseMode.MARKDOWN,
     )
 
@@ -131,67 +111,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not url:
         await update.message.reply_text(
-            "❌ Không tìm thấy link Douyin/TikTok.\n"
-            "Vui lòng gửi đúng link video."
+            "❌ Không tìm thấy link Douyin/TikTok.\nVui lòng gửi đúng link video."
         )
         return
 
-    status_msg = await update.message.reply_text("⏳ Đang tải video, vui lòng chờ...")
+    status_msg = await update.message.reply_text("⏳ Đang xử lý link...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         try:
             loop = asyncio.get_event_loop()
-            filepath = await loop.run_in_executor(
-                None, download_video, url, tmp_dir
-            )
 
+            # Lấy link video
+            await status_msg.edit_text("🔍 Đang lấy link video...")
+            video_url, title = await loop.run_in_executor(None, get_video_url, url)
+
+            # Tải video
+            await status_msg.edit_text("⬇️ Đang tải video...")
+            filepath = os.path.join(tmp_dir, "video.mp4")
+            await loop.run_in_executor(None, download_file, video_url, filepath)
+
+            # Kiểm tra dung lượng
             file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
             if file_size_mb > MAX_FILE_MB:
                 await status_msg.edit_text(
-                    f"❌ Video quá lớn ({file_size_mb:.1f}MB).\n"
-                    f"Giới hạn cho phép: {MAX_FILE_MB}MB."
+                    f"❌ Video quá lớn ({file_size_mb:.1f}MB). Giới hạn: {MAX_FILE_MB}MB."
                 )
                 return
 
+            # Gửi video
             await status_msg.edit_text("📤 Đang gửi video...")
-            with open(filepath, "rb") as video_file:
+            with open(filepath, "rb") as vf:
                 await update.message.reply_video(
-                    video=video_file,
-                    caption="✅ Video không logo từ Douyin\n🤖 @Douyin85_Bot",
+                    video=vf,
+                    caption=f"✅ {title[:200] if title else 'Video Douyin'}\n🤖 @Douyin85_Bot",
                     supports_streaming=True,
                 )
             await status_msg.delete()
-            logger.info(f"Đã gửi video thành công: {url}")
+            logger.info(f"Gửi thành công: {url}")
 
-        except yt_dlp.utils.DownloadError as e:
-            logger.error(f"Lỗi tải video: {e}")
+        except Exception as e:
+            logger.error(f"Lỗi: {e}")
             await status_msg.edit_text(
                 "❌ Không thể tải video này.\n\n"
-                "Nguyên nhân có thể:\n"
-                "• Video đã bị xóa hoặc riêng tư\n"
+                "Có thể do:\n"
+                "• Video riêng tư hoặc đã bị xóa\n"
                 "• Link không hợp lệ\n"
-                "• Video bị giới hạn khu vực"
-            )
-        except Exception as e:
-            logger.error(f"Lỗi không xác định: {e}")
-            await status_msg.edit_text(
-                "❌ Đã xảy ra lỗi. Vui lòng thử lại sau."
+                "• Thử lại sau vài phút"
             )
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        raise ValueError("⚠️  Vui lòng điền BOT_TOKEN vào file trước khi chạy!")
-
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("🤖 Bot đang chạy... Nhấn Ctrl+C để dừng.")
+    logger.info("🤖 Bot đang chạy...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
