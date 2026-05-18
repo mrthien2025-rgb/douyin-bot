@@ -22,7 +22,7 @@ from telegram.ext import (
 import yt_dlp
 
 # ─── CẤU HÌNH ────────────────────────────────────────────────────────────────
-BOT_TOKEN = "8701813803:AAFNh0w6ZIVoqkZ79Z0UQoJGdPfr8YKLnfA"
+BOT_TOKEN = "8701813803:AAFpLhURyfdncYHKbdoTSaWsGD1veNPJueQ"
 MAX_FILE_MB = 50                     # Giới hạn Telegram Bot API (MB)
 # ──────────────────────────────────────────────────────────────────────────────
 
